@@ -919,9 +919,14 @@ export function build(input) {
 
   // 7. layouts
   {
-    const linkOf = (s) => (s === null ? null : { title: s.data.title, url: s.url, date: s.data.date ?? '', date_long: s.data.date === undefined ? '' : longDate(s.data.date) });
+    const linkOf = (s) => {
+      if (s === null) return null;
+      if (s._link === undefined) s._link = { title: s.data.title, url: s.url, date: s.data.date ?? '', date_long: s.data.date === undefined ? '' : longDate(s.data.date) };
+      return s._link;
+    };
     const cardOf = (s) => {
       if (s._rm === undefined) s._rm = Math.max(1, Math.ceil(wordsOf(s.body) / 200));
+      if (s._tagList === undefined) s._tagList = s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url }));
       return {
         title: s.data.title,
         url: s.url,
@@ -930,14 +935,17 @@ export function build(input) {
         summary: s.data.summary ?? '',
         excerpt: s.excerpt,
         reading_minutes: s._rm,
-        tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
+        tags: s._tagList,
       };
     };
+    // A post's page reuses its cached card (the spread copies the same values);
+    // the toc entries already hold exactly {level, id, html}, so they are
+    // shared, not re-created. Templates only ever read these objects.
     const pageOf = (s) => ({
-      ...cardOf(s),
+      ...(b.cards.get(s) ?? cardOf(s)),
       slug: s.slug,
       content: s.html,
-      toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
+      toc: s.toc,
       newer: linkOf(s.newer ?? null),
       older: linkOf(s.older ?? null),
       is_post: s.post,
