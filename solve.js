@@ -269,26 +269,32 @@ function escapeRange(s, a, b) {
   return out;
 }
 
+const SPECIAL_RE = /[\\`*\[&<>"']/g;
+
 /**
  * s[i..end) rendered inline; `env.link(target)` is a link's href. Works on index
  * ranges of the one string — nested constructs recurse on ranges, never on
  * substring copies — with the reference's semantics exactly (a backslash escape
- * writes its character ESCAPED, so \> is "&gt;", not ">").
+ * writes its character ESCAPED, so \> is "&gt;", not ">"). One regex scan finds
+ * the next character needing any work (a Markdown special or an HTML special);
+ * the plain run before it needs no escaping by construction and is copied raw.
+ * SPECIAL_RE's lastIndex is set before every exec, and no scan is ever in
+ * flight across a recursive call, so sharing the regex is safe.
  */
 function inlineRange(s, i, end, env) {
   let out = '';
   while (i < end) {
-    // The next special character, found with indexOf scans (a first hit at or
-    // past `end` means none inside this range).
-    let n = end;
-    let k;
-    k = s.indexOf('\\', i); if (k !== -1 && k < n) n = k;
-    k = s.indexOf('`', i); if (k !== -1 && k < n) n = k;
-    k = s.indexOf('*', i); if (k !== -1 && k < n) n = k;
-    k = s.indexOf('[', i); if (k !== -1 && k < n) n = k;
-    if (n > i) { out += escapeRange(s, i, n); i = n; }
+    SPECIAL_RE.lastIndex = i;
+    const sm = SPECIAL_RE.exec(s);
+    const n = sm === null || sm.index >= end ? end : sm.index;
+    if (n > i) { out += s.slice(i, n); i = n; }
     if (i >= end) break;
     const c = s[i];
+    if (c === '&') { out += '&amp;'; i++; continue; }
+    if (c === '<') { out += '&lt;'; i++; continue; }
+    if (c === '>') { out += '&gt;'; i++; continue; }
+    if (c === '"') { out += '&quot;'; i++; continue; }
+    if (c === "'") { out += '&#39;'; i++; continue; }
     if (c === '\\') {
       if (i + 1 < end && ESCAPABLE.has(s[i + 1])) {
         const e = s[i + 1];
