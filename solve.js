@@ -613,6 +613,17 @@ const RT = { lookup, textOf, truthy, esc: escapeHtml };
 
 /** Compile parsed template nodes to a function (R, T, scope, depth) -> string. */
 function compileNodes(nodes) {
+  // Every distinct lookup path of this template is hoisted into PC (one array
+  // per path, built once at compile time): the generated code must not allocate
+  // a fresh path array for every {{ }} / if / for it evaluates.
+  const paths = [];
+  const pathIds = new Map();
+  const pid = (path) => {
+    const k = JSON.stringify(path);
+    let id = pathIds.get(k);
+    if (id === undefined) { id = paths.length; paths.push(path); pathIds.set(k, id); }
+    return id;
+  };
   let tmp = 0;
   const gen = (ns, out) => {
     for (const n of ns) {
@@ -621,13 +632,13 @@ function compileNodes(nodes) {
           out.push(`out+=${JSON.stringify(n.text)};`);
           break;
         case 'var':
-          out.push(`out+=R.esc(R.textOf(R.lookup(scope,${JSON.stringify(n.path)})));`);
+          out.push(`out+=ES(TO(LU(scope,PC[${pid(n.path)}])));`);
           break;
         case 'raw':
-          out.push(`out+=R.textOf(R.lookup(scope,${JSON.stringify(n.path)}));`);
+          out.push(`out+=TO(LU(scope,PC[${pid(n.path)}]));`);
           break;
         case 'if': {
-          out.push(`if(R.truthy(R.lookup(scope,${JSON.stringify(n.path)}))!==${n.not}){`);
+          out.push(`if(TR(LU(scope,PC[${pid(n.path)}]))!==${n.not}){`);
           gen(n.then, out);
           out.push('}');
           if (n.else !== null) {
@@ -639,7 +650,7 @@ function compileNodes(nodes) {
         }
         case 'for': {
           const k = tmp++;
-          out.push(`{const __xs${k}=R.lookup(scope,${JSON.stringify(n.path)});if(Array.isArray(__xs${k})){for(let __i${k}=0;__i${k}<__xs${k}.length;__i${k}++){const __p${k}=scope;scope={vars:{},parent:__p${k}};scope.vars[${JSON.stringify(n.name)}]=__xs${k}[__i${k}];scope.vars.loop={index:__i${k}+1,first:__i${k}===0,last:__i${k}===__xs${k}.length-1,length:__xs${k}.length};`);
+          out.push(`{const __xs${k}=LU(scope,PC[${pid(n.path)}]);if(Array.isArray(__xs${k})){for(let __i${k}=0;__i${k}<__xs${k}.length;__i${k}++){const __p${k}=scope;scope={vars:{[${JSON.stringify(n.name)}]:__xs${k}[__i${k}],loop:{index:__i${k}+1,first:__i${k}===0,last:__i${k}===__xs${k}.length-1,length:__xs${k}.length}},parent:__p${k}};`);
           gen(n.body, out);
           out.push(`scope=__p${k};}}}`);
           break;
@@ -652,10 +663,11 @@ function compileNodes(nodes) {
       }
     }
   };
-  const parts = ['let out="";'];
+  const parts = ['const LU=R.lookup,TO=R.textOf,TR=R.truthy,ES=R.esc;let out="";'];
   gen(nodes, parts);
   parts.push('return out;');
-  return new Function('R', 'T', 'scope', 'depth', parts.join(''));
+  const factory = new Function('PC', `return function(R,T,scope,depth){${parts.join('')}}`);
+  return factory(paths);
 }
 
 // ---------------------------------------------------------------- build
@@ -769,18 +781,42 @@ export function build(input) {
   // 4. markdown + link resolution
   {
     const staticPaths = new Set(b.statics.map((f) => f.path));
+    // Link resolutions repeat across sources in one build; bySource and the
+    // static set are fixed for the whole phase, so a resolved href is cached
+    // per (directory, target). A broken target caches as null: its report line
+    // names the linking source, so it is re-added for each source. (A target
+    // never holds whitespace, so the last newline of the key is the split.)
+    const linkCache = new Map();
     for (const s of b.sources) {
       const dir = dirOf(s.path);
       const env = {
         link: (target) => {
-          if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target) || target.startsWith('/') || target.startsWith('#')) return target;
+          const key = `${dir}\n${target}`;
+          const hit = linkCache.get(key);
+          if (hit !== undefined) {
+            if (hit === null) { b.broken.add(`broken-link ${s.path} -> ${target}`); return target; }
+            return hit;
+          }
+          if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target) || target.startsWith('/') || target.startsWith('#')) {
+            linkCache.set(key, target);
+            return target;
+          }
           const hash = target.indexOf('#');
           const rel = hash === -1 ? target : target.slice(0, hash);
           const frag = hash === -1 ? '' : target.slice(hash);
           const path = rel === '' ? null : resolvePath(dir, rel);
-          if (path !== null && b.bySource.has(path)) return `${b.bySource.get(path).url}${frag}`;
-          if (path !== null && staticPaths.has(path)) return `${b.base}/${path}${frag}`;
+          if (path !== null && b.bySource.has(path)) {
+            const out = `${b.bySource.get(path).url}${frag}`;
+            linkCache.set(key, out);
+            return out;
+          }
+          if (path !== null && staticPaths.has(path)) {
+            const out = `${b.base}/${path}${frag}`;
+            linkCache.set(key, out);
+            return out;
+          }
           b.broken.add(`broken-link ${s.path} -> ${target}`);
+          linkCache.set(key, null);
           return target;
         },
       };
