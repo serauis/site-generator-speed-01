@@ -221,77 +221,124 @@ export function parseFrontMatter(text) {
 
 const ESCAPABLE = new Set(['\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '>']);
 
-function findUnescaped(s, what, from) {
-  for (let j = from; j <= s.length - what.length; j++) {
-    if (s[j] === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) { j++; continue; }
+/** The first index in [from, end) where `s` holds `what` outside a backslash escape, or -1. */
+function findUnescaped(s, what, from, end) {
+  const last = end - what.length;
+  for (let j = from; j <= last; j++) {
+    if (s[j] === '\\' && j + 1 < end && ESCAPABLE.has(s[j + 1])) {
+      j++;
+      continue;
+    }
     if (s.startsWith(what, j)) return j;
   }
   return -1;
 }
 
-function findSingleStar(s, from) {
-  for (let j = from; j < s.length; j++) {
+/** The first single * in [from, end) (one whose run is not **), outside an escape, or -1. */
+function findSingleStar(s, from, end) {
+  for (let j = from; j < end; j++) {
     const c = s[j];
-    if (c === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) { j++; continue; }
+    if (c === '\\' && j + 1 < end && ESCAPABLE.has(s[j + 1])) {
+      j++;
+      continue;
+    }
     if (c !== '*') continue;
-    if (s[j + 1] === '*') { j++; continue; }
+    if (j + 1 < end && s[j + 1] === '*') {
+      j++;
+      continue;
+    }
     return j;
   }
   return -1;
 }
 
-/** `s` rendered inline; `env.link(target)` is a link's href. */
-export function inline(s, env) {
+const ESC_RE = /[&<>"']/g;
+
+/** s[a..b) with & < > " ' escaped; the whole string itself when the range is all of it and clean. */
+function escapeRange(s, a, b) {
+  ESC_RE.lastIndex = a;
+  let m = ESC_RE.exec(s);
+  if (m === null || m.index >= b) return a === 0 && b === s.length ? s : s.slice(a, b);
+  let out = s.slice(a, m.index) + ESCAPES[m[0]];
+  let start = m.index + 1;
+  while ((m = ESC_RE.exec(s)) !== null && m.index < b) {
+    out += s.slice(start, m.index) + ESCAPES[m[0]];
+    start = m.index + 1;
+  }
+  if (start < b) out += s.slice(start, b);
+  return out;
+}
+
+/**
+ * s[i..end) rendered inline; `env.link(target)` is a link's href. Works on index
+ * ranges of the one string — nested constructs recurse on ranges, never on
+ * substring copies — with the reference's semantics exactly (a backslash escape
+ * writes its character ESCAPED, so \> is "&gt;", not ">").
+ */
+function inlineRange(s, i, end, env) {
   let out = '';
-  let i = 0;
-  const n = s.length;
-  while (i < n) {
-    // Next special character, found with C++ indexOf scans (no per-char loop).
-    let j = n;
+  while (i < end) {
+    // The next special character, found with indexOf scans (a first hit at or
+    // past `end` means none inside this range).
+    let n = end;
     let k;
-    k = s.indexOf('\\', i); if (k !== -1 && k < j) j = k;
-    k = s.indexOf('`', i); if (k !== -1 && k < j) j = k;
-    k = s.indexOf('*', i); if (k !== -1 && k < j) j = k;
-    k = s.indexOf('[', i); if (k !== -1 && k < j) j = k;
-    if (j > i) out += escapeHtml(s.slice(i, j));
-    if (j >= n) break;
-    const c = s[j];
+    k = s.indexOf('\\', i); if (k !== -1 && k < n) n = k;
+    k = s.indexOf('`', i); if (k !== -1 && k < n) n = k;
+    k = s.indexOf('*', i); if (k !== -1 && k < n) n = k;
+    k = s.indexOf('[', i); if (k !== -1 && k < n) n = k;
+    if (n > i) { out += escapeRange(s, i, n); i = n; }
+    if (i >= end) break;
+    const c = s[i];
     if (c === '\\') {
-      if (j + 1 < n && ESCAPABLE.has(s[j + 1])) { out += s[j + 1]; i = j + 2; }
-      else { out += '\\'; i = j + 1; }
+      if (i + 1 < end && ESCAPABLE.has(s[i + 1])) {
+        const e = s[i + 1];
+        out += e === '>' ? '&gt;' : e;
+        i += 2;
+      } else { out += '\\'; i++; }
       continue;
     }
     if (c === '`') {
-      const j2 = s.indexOf('`', j + 1);
-      if (j2 > j + 1) { out += `<code>${escapeHtml(s.slice(j + 1, j2))}</code>`; i = j2 + 1; }
-      else { out += '`'; i = j + 1; }
+      const j = s.indexOf('`', i + 1);
+      if (j !== -1 && j < end && j > i + 1) {
+        out += `<code>${escapeRange(s, i + 1, j)}</code>`;
+        i = j + 1;
+      } else { out += '`'; i++; }
       continue;
     }
     if (c === '*') {
-      if (s[j + 1] === '*') {
-        const j2 = findUnescaped(s, '**', j + 2);
-        if (j2 > j + 2) { out += `<strong>${inline(s.slice(j + 2, j2), env)}</strong>`; i = j2 + 2; }
-        else { out += '**'; i = j + 2; }
+      if (i + 1 < end && s[i + 1] === '*') {
+        const j = findUnescaped(s, '**', i + 2, end);
+        if (j > i + 2) { out += `<strong>${inlineRange(s, i + 2, j, env)}</strong>`; i = j + 2; }
+        else { out += '**'; i += 2; }
         continue;
       }
-      const j2 = findSingleStar(s, j + 1);
-      if (j2 > j + 1) { out += `<em>${inline(s.slice(j + 1, j2), env)}</em>`; i = j2 + 1; }
-      else { out += '*'; i = j + 1; }
+      const j = findSingleStar(s, i + 1, end);
+      if (j > i + 1) { out += `<em>${inlineRange(s, i + 1, j, env)}</em>`; i = j + 1; }
+      else { out += '*'; i++; }
       continue;
     }
     // c === '['
-    const kk = findUnescaped(s, ']', j + 1);
-    const m = kk !== -1 && s[kk + 1] === '(' ? s.indexOf(')', kk + 2) : -1;
+    const kk = findUnescaped(s, ']', i + 1, end);
+    let m = -1;
+    if (kk !== -1 && kk + 1 < end && s[kk + 1] === '(') {
+      m = s.indexOf(')', kk + 2);
+      if (m === -1 || m >= end) m = -1;
+    }
     const target = m === -1 ? '' : s.slice(kk + 2, m);
     if (target !== '' && !/\s/.test(target)) {
-      out += `<a href="${escapeHtml(env.link(target))}">${inline(s.slice(j + 1, kk), env)}</a>`;
+      out += `<a href="${escapeHtml(env.link(target))}">${inlineRange(s, i + 1, kk, env)}</a>`;
       i = m + 1;
     } else {
       out += '[';
-      i = j + 1;
+      i++;
     }
   }
   return out;
+}
+
+/** `s` rendered inline; `env.link(target)` is a link's href. */
+export function inline(s, env) {
+  return inlineRange(s, 0, s.length, env);
 }
 
 const trimLine = (line) => {
