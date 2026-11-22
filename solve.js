@@ -663,9 +663,19 @@ function compileNodes(nodes) {
 export const REPORT_FILE = 'build-report.txt';
 export const RESERVED = Object.freeze(['posts', 'tags', 'page']);
 
+/** The words of a body: runs of non-whitespace (JS \S), counted without allocating a match array. */
 function wordsOf(text) {
-  const m = text.match(/\S+/g);
-  return m === null ? 0 : m.length;
+  let count = 0;
+  let inWord = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    let ws;
+    if (c < 128) ws = c === 32 || (c >= 9 && c <= 13);
+    else ws = c === 160 || c === 5760 || (c >= 8192 && c <= 8202) || c === 8232 || c === 8233 || c === 8239 || c === 8287 || c === 12288 || c === 65279;
+    if (ws) inWord = false;
+    else if (!inWord) { inWord = true; count++; }
+  }
+  return count;
 }
 
 function resolvePath(dir, rel) {
