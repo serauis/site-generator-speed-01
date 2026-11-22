@@ -788,7 +788,10 @@ export function build(input) {
   {
     const files = [...b.input.files].sort((x, y) => byCodeUnits(x.path, y.path));
     for (const f of files) {
-      if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.replace(/\r\n?/g, '\n') });
+      // The line-end normalization scans the whole body; most sources hold no
+      // "\r" at all, and a one-character includes() (memchr) is far cheaper
+      // than the regex pass it gates.
+      if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.includes('\r') ? f.content.replace(/\r\n?/g, '\n') : f.content });
       else b.statics.push({ path: f.path, content: f.content });
     }
   }
@@ -836,22 +839,23 @@ export function build(input) {
     const staticPaths = new Set(b.statics.map((f) => f.path));
     // Link resolutions repeat across sources in one build; bySource and the
     // static set are fixed for the whole phase, so a resolved href is cached
-    // per (directory, target). A broken target caches as null: its report line
-    // names the linking source, so it is re-added for each source. (A target
-    // never holds whitespace, so the last newline of the key is the split.)
+    // per (directory, target) in nested Maps (no key string built per call).
+    // A broken target caches as null: its report line names the linking
+    // source, so it is re-added for each source.
     const linkCache = new Map();
     for (const s of b.sources) {
       const dir = dirOf(s.path);
+      let byTarget = linkCache.get(dir);
+      if (byTarget === undefined) { byTarget = new Map(); linkCache.set(dir, byTarget); }
       const env = {
         link: (target) => {
-          const key = `${dir}\n${target}`;
-          const hit = linkCache.get(key);
+          const hit = byTarget.get(target);
           if (hit !== undefined) {
             if (hit === null) { b.broken.add(`broken-link ${s.path} -> ${target}`); return target; }
             return hit;
           }
           if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target) || target.startsWith('/') || target.startsWith('#')) {
-            linkCache.set(key, target);
+            byTarget.set(target, target);
             return target;
           }
           const hash = target.indexOf('#');
@@ -860,16 +864,16 @@ export function build(input) {
           const path = rel === '' ? null : resolvePath(dir, rel);
           if (path !== null && b.bySource.has(path)) {
             const out = `${b.bySource.get(path).url}${frag}`;
-            linkCache.set(key, out);
+            byTarget.set(target, out);
             return out;
           }
           if (path !== null && staticPaths.has(path)) {
             const out = `${b.base}/${path}${frag}`;
-            linkCache.set(key, out);
+            byTarget.set(target, out);
             return out;
           }
           b.broken.add(`broken-link ${s.path} -> ${target}`);
-          linkCache.set(key, null);
+          byTarget.set(target, null);
           return target;
         },
       };
